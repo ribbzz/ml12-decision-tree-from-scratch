@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ribbzz-scratch-tree"
+version = "0.1.0"
+description = "An educational entropy-based decision tree implemented in pure Python"
+readme = "README.rst"
+requires-python = ">=3.10"
+dependencies = []
+authors = [{name = "Rabeeh Abou Ismail"}]
+
+[project.urls]
+Repository = "https://github.com/ribbzz/ml12-decision-tree-from-scratch"
+
+[project.scripts]
+scratch-tree = "scratch_tree.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scratch_tree"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "examples", "README.rst", "report.md", "pyproject.toml"]
