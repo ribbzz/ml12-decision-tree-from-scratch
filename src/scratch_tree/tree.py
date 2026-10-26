@@ -1,4 +1,4 @@
-"""Binary classification trees: entropy, split search and growth from scratch."""
+"""A binary decision tree using entropy and information gain."""
 from __future__ import annotations
 
 from collections import Counter
@@ -14,30 +14,45 @@ def entropy(labels):
     """Shannon entropy in bits; an empty or pure set has entropy zero."""
     return _entropy_counts(Counter(labels).values())
 
-
 def _entropy_counts(counts):
     counts = list(counts)
     total = sum(counts)
-    return max(0.0, -sum((n / total) * math.log2(n / total) for n in counts if n)) if total else 0.0
+    if total == 0:
+        return 0.0
+
+    result = 0.0
+    for count in counts:
+        if count > 0:
+            probability = count / total
+            result -= probability * math.log2(probability)
+    return max(0.0, result)
 
 
 def information_gain(parent, left, right):
     """Entropy reduction for a binary partition of parent labels."""
-    parent, left, right = list(parent), list(left), list(right)
+    parent = list(parent)
+    left = list(left)
+    right = list(right)
     if Counter(parent) != Counter(left) + Counter(right):
         raise ValueError("Children must partition the parent labels.")
     if not parent:
         return 0.0
-    return entropy(parent) - (len(left) * entropy(left) + len(right) * entropy(right)) / len(parent)
+    children_entropy = len(left) * entropy(left) + len(right) * entropy(right)
+    return entropy(parent) - children_entropy / len(parent)
+
 
 
 def _missing(value):
-    return value is None or (isinstance(value, Real) and math.isnan(float(value)))
+    if value is None:
+        return True
+    if isinstance(value, Real):
+        return math.isnan(float(value))
+    return False
 
 
 @dataclass
 class Node:
-    """A leaf stores class counts; a split additionally stores a question."""
+    """Class counts and, for internal nodes, a split and two children."""
     counts: tuple
     depth: int
     feature: int | None = None
@@ -58,13 +73,11 @@ class Node:
 
 
 class DecisionTreeClassifier:
-    """Binary entropy tree for finite numeric and hashable categorical features.
+    """A tree for two-class tabular data.
 
-    X is an iterable of equal-length rows; y contains nonmissing hashable labels.
-    max_depth counts edges from the root (root depth = 0). max_leaf_nodes is a
-    hard leaf budget, enforced by expanding the most useful available leaf.
-    None/NaN feature values are routed in the direction learned at each split.
-    Class ties use first appearance in training; split ties use feature order.
+    X contains rows of features; y contains their labels. The root has depth 0.
+    Missing values follow the route chosen during training. Tied predictions
+    use the class that appeared first in y.
     """
 
     def __init__(self, max_depth=5, max_leaf_nodes=None, min_samples_split=2,
@@ -86,6 +99,7 @@ class DecisionTreeClassifier:
         self.min_samples_leaf = min_samples_leaf
         self.min_gain = min_gain
 
+
     def fit(self, X, y, feature_names=None, feature_types=None):
         """Learn categories, class order, split questions and missing routes."""
         self.root_ = None  # A failed refit must not leave an old model usable.
@@ -104,15 +118,24 @@ class DecisionTreeClassifier:
         if len(self.classes_) > 2:
             raise ValueError("Binary classification only: y must contain at most two distinct classes.")
         self.n_features_in_ = width
-        self.feature_names_ = list(feature_names) if feature_names is not None else [f"x{i}" for i in range(width)]
+        if feature_names is None:
+            self.feature_names_ = [f"x{i}" for i in range(width)]
+        else:
+            self.feature_names_ = list(feature_names)
         if len(self.feature_names_) != width or len(set(self.feature_names_)) != width:
             raise ValueError("Provide one distinct feature name per column.")
         if feature_types is None:
-            self.feature_types_ = [
-                "numeric" if all(isinstance(row[j], Real) and not isinstance(row[j], bool)
-                                 for row in rows if not _missing(row[j])) else "categorical"
-                for j in range(width)
-            ]
+            self.feature_types_ = []
+            for column in range(width):
+                kind = "numeric"
+                for row in rows:
+                    value = row[column]
+                    if _missing(value):
+                        continue
+                    if not isinstance(value, Real) or isinstance(value, bool):
+                        kind = "categorical"
+                        break
+                self.feature_types_.append(kind)
         else:
             self.feature_types_ = list(feature_types)
         if len(self.feature_types_) != width or any(t not in {"numeric", "categorical"} for t in self.feature_types_):
@@ -129,17 +152,22 @@ class DecisionTreeClassifier:
         self.root_ = make_node(range(len(rows)), 0)
         self.n_leaves_ = 1
         self.depth_ = 0
-        queue, counter = [], itertools.count()
+        queue = []
+        counter = itertools.count()
 
         def offer(node, indices):
-            if (node.samples < self.min_samples_split or
-                    sum(n > 0 for n in node.counts) <= 1 or
-                    (self.max_depth is not None and node.depth >= self.max_depth)):
+            if node.samples < self.min_samples_split:
+                return
+            if sum(count > 0 for count in node.counts) <= 1:
+                return
+            if self.max_depth is not None and node.depth >= self.max_depth:
                 return
             split = self._best_split(rows, encoded, indices, node.counts)
             if split is not None:
-                # Weight the local gain by node size when comparing different leaves.
-                heapq.heappush(queue, (-split[0] * node.samples, next(counter), node, indices, split))
+                # The heap should choose the largest total entropy reduction first.
+                priority = -split[0] * node.samples
+                entry = (priority, next(counter), node, indices, split)
+                heapq.heappush(queue, entry)
 
         offer(self.root_, list(range(len(rows))))
         while queue and (self.max_leaf_nodes is None or self.n_leaves_ < self.max_leaf_nodes):
@@ -147,7 +175,10 @@ class DecisionTreeClassifier:
             node.gain, node.feature, node.kind, node.value, node.missing_left = split
             left, right = [], []
             for i in indices:
-                (left if self._go_left(rows[i], node) else right).append(i)
+                if self._go_left(rows[i], node):
+                    left.append(i)
+                else:
+                    right.append(i)
             node.left = make_node(left, node.depth + 1)
             node.right = make_node(right, node.depth + 1)
             self.n_leaves_ += 1
@@ -175,6 +206,7 @@ class DecisionTreeClassifier:
             prepared.append(converted)
         return prepared
 
+
     def _best_split(self, rows, labels, indices, parent_counts):
         """Scan numeric boundaries and categorical equality-vs-rest splits."""
         total, classes = len(indices), len(parent_counts)
@@ -184,12 +216,20 @@ class DecisionTreeClassifier:
         def consider(left_known, right_known, missing, feature, kind, value):
             nonlocal best
             for missing_left in (True, False):
-                left = [left_known[k] + (missing[k] if missing_left else 0) for k in range(classes)]
-                right = [right_known[k] + (0 if missing_left else missing[k]) for k in range(classes)]
-                nl, nr = sum(left), sum(right)
-                if min(nl, nr) < self.min_samples_leaf:
+                left = left_known.copy()
+                right = right_known.copy()
+                for k in range(classes):
+                    if missing_left:
+                        left[k] += missing[k]
+                    else:
+                        right[k] += missing[k]
+
+                left_size = sum(left)
+                right_size = sum(right)
+                if min(left_size, right_size) < self.min_samples_leaf:
                     continue
-                gain = parent_entropy - (nl * _entropy_counts(left) + nr * _entropy_counts(right)) / total
+                children_entropy = left_size * _entropy_counts(left) + right_size * _entropy_counts(right)
+                gain = parent_entropy - children_entropy / total
                 if gain > self.min_gain and (best is None or gain > best[0] + 1e-15):
                     best = (gain, feature, kind, value, missing_left)
 
@@ -237,7 +277,9 @@ class DecisionTreeClassifier:
             return node.missing_left
         if node.kind == "missing":
             return False
-        return value <= node.value if node.kind == "numeric" else value == node.value
+        if node.kind == "numeric":
+            return value <= node.value
+        return value == node.value
 
     def _check_fitted(self):
         if getattr(self, "root_", None) is None:
@@ -246,8 +288,12 @@ class DecisionTreeClassifier:
     def _leaf(self, row):
         node = self.root_
         while not node.is_leaf:
-            node = node.left if self._go_left(row, node) else node.right
+            if self._go_left(row, node):
+                node = node.left
+            else:
+                node = node.right
         return node
+
 
     def predict_proba(self, X):
         """Return leaf class proportions, ordered like classes_."""
@@ -259,29 +305,45 @@ class DecisionTreeClassifier:
         return result
 
     def predict(self, X):
-        return [self.classes_[max(range(len(p)), key=p.__getitem__)] for p in self.predict_proba(X)]
+        predictions = []
+        for probabilities in self.predict_proba(X):
+            best_class = probabilities.index(max(probabilities))
+            predictions.append(self.classes_[best_class])
+        return predictions
 
     def score(self, X, y):
         """Ordinary classification accuracy (not balanced accuracy)."""
-        predicted, actual = self.predict(X), list(y)
+        predicted = self.predict(X)
+        actual = list(y)
         if not actual or len(predicted) != len(actual):
             raise ValueError("Scoring requires matching, nonempty predictions and labels.")
-        return sum(a == b for a, b in zip(predicted, actual)) / len(actual)
+        correct = 0
+        for prediction, label in zip(predicted, actual):
+            if prediction == label:
+                correct += 1
+        return correct / len(actual)
 
     def _description(self, node):
-        winner = self.classes_[max(range(len(node.counts)), key=node.counts.__getitem__)]
+        best_class = node.counts.index(max(node.counts))
+        winner = self.classes_[best_class]
         detail = f"n={node.samples}, H={_entropy_counts(node.counts):.4f}, class={winner!r}, counts={node.counts}"
         if node.is_leaf:
             return "leaf: " + detail
         feature = self.feature_names_[node.feature]
-        question = (f"{feature} is missing" if node.kind == "missing" else
-                    f"{feature} {'<=' if node.kind == 'numeric' else '=='} {node.value!r}")
+        if node.kind == "missing":
+            question = f"{feature} is missing"
+        elif node.kind == "numeric":
+            question = f"{feature} <= {node.value!r}"
+        else:
+            question = f"{feature} == {node.value!r}"
         return f"{question}? gain={node.gain:.4f}, missing={'yes' if node.missing_left else 'no'}; {detail}"
+
 
     def export_text(self):
         """Readable tree; yes follows the left branch, no follows the right."""
         self._check_fitted()
-        lines, stack = [], [(self.root_, "", "")]
+        lines = []
+        stack = [(self.root_, "", "")]
         while stack:
             node, indent, branch = stack.pop()
             lines.append(indent + branch + self._description(node))
@@ -293,7 +355,9 @@ class DecisionTreeClassifier:
     def export_dot(self):
         """Graphviz DOT source; rendering requires an optional Graphviz install."""
         self._check_fitted()
-        lines, stack, counter = ["digraph Tree {", "  node [shape=box];"], [(self.root_, 0)], itertools.count(1)
+        lines = ["digraph Tree {", "  node [shape=box];"]
+        stack = [(self.root_, 0)]
+        counter = itertools.count(1)
         while stack:
             node, number = stack.pop()
             lines.append(f"  n{number} [label={json.dumps(self._description(node))}];")

@@ -49,7 +49,6 @@ def read_csv(path, target, drop):
         raise ValueError("CSV must have data and at least one predictor.")
     return rows, labels, features
 
-
 def convert_features(rows, training, names, forced_categories):
     """Infer numeric columns from training rows only; empty cells are missing."""
     if any(c not in names for c in forced_categories):
@@ -96,6 +95,7 @@ def classification_metrics(actual, predicted, classes):
         'balanced_accuracy_present_classes': sum(recalls) / len(recalls),
         'per_class': per_class,
     }
+
 
 
 def main(argv=None):
